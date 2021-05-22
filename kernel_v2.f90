@@ -1,4 +1,7 @@
-PROGRAM test_kernels
+!----------------
+! kernels
+!----------------
+MODULE my_kernels
 
   IMPLICIT NONE
 
@@ -59,89 +62,6 @@ PROGRAM test_kernels
 
   END TYPE RTV_type
 
-  !------- Test -------!
-  TYPE(RTV_type) :: RTV
-  INTEGER, PARAMETER :: N_LAYERS = MAX_N_LAYERS
-  INTEGER :: k, alloc_stat
-  INTEGER :: count_rate, count_start, count_end
-  REAL :: elapsed
-
-  !---- local arrays --- !
-  REAL(fp), ALLOCATABLE, DIMENSION( :,:,: ) :: Pff_AD,Pbb_AD,s_Refl_AD,s_Trans_AD
-  REAL(fp), ALLOCATABLE, DIMENSION( :,: ) :: s_source_UP_AD,s_source_DOWN_AD
-  REAL(fp), DIMENSION(N_LAYERS) ::  w, T_OD
-  REAL(fp), DIMENSION(N_LAYERS) :: w_AD, T_OD_AD
-  REAL(fp), DIMENSION( 0:N_LAYERS ) :: Planck_Atmosphere_AD 
-!$acc declare create(w, T_OD, w_AD, T_OD_AD, Planck_Atmosphere_AD)
-
-  REAL(fp), DIMENSION(MAX_N_ANGLES,MAX_N_ANGLES) :: term1,term2,term3,term4,term5_AD
-  REAL(fp), DIMENSION(MAX_N_ANGLES,MAX_N_ANGLES) :: trans1,trans3,trans4,temp1,temp2,temp3
-  REAL(fp), DIMENSION(MAX_N_ANGLES) :: C1_AD, C2_AD
-
-  ALLOCATE(Pff_AD(MAX_N_ANGLES, MAX_N_ANGLES+1, N_LAYERS), &
-           Pbb_AD(MAX_N_ANGLES, MAX_N_ANGLES+1, N_LAYERS), &
-           s_Refl_AD(MAX_N_ANGLES, MAX_N_ANGLES, N_LAYERS), &
-           s_Trans_AD(MAX_N_ANGLES, MAX_N_ANGLES, N_LAYERS), &
-           s_source_UP_AD(MAX_N_ANGLES, N_LAYERS), &
-           s_source_DOWN_AD(MAX_N_ANGLES, N_LAYERS), &
-           STAT = alloc_stat )
-  IF ( alloc_stat /= 0 ) STOP
-
-  !---- fill arrays with random numbers ----!
-  PRINT*, "Filling arrays with random values"
-  CALL RANDOM_NUMBER(Pff_AD)
-  CALL RANDOM_NUMBER(Pbb_AD)
-  CALL RANDOM_NUMBER(s_Refl_AD)
-  CALL RANDOM_NUMBER(s_Trans_AD)
-  CALL RANDOM_NUMBER(s_source_UP_AD)
-  CALL RANDOM_NUMBER(s_source_DOWN_AD)
-  CALL RANDOM_NUMBER(w)
-  CALL RANDOM_NUMBER(T_OD)
-  CALL RANDOM_NUMBER(w_AD)
-  CALL RANDOM_NUMBER(T_OD_AD)
-  CALL RANDOM_NUMBER(Planck_Atmosphere_AD)
-  PRINT*, "Finished filling arrays with random values."
-
-!$acc update device(w, T_OD, w_AD, T_OD_AD, Planck_Atmosphere_AD)
-!$acc enter data copyin(Pff_AD,Pbb_AD,s_Refl_AD,s_Trans_AD, &
-!$acc                  s_source_UP_AD,s_source_DOWN_AD)
-
-  !---- create RTV array ----!
-  PRINT*, "Creating RTV"
-  RTV%n_Streams = 6
-  CALL RTV_Create( RTV, MAX_N_ANGLES, MAX_N_LEGENDRE_TERMS, N_LAYERS )
-  PRINT*, "Finished creating RTV"
-
-
-  !---- call kernel ----!
-  PRINT*, "Calling kernel"  
-  CALL SYSTEM_CLOCK (count_rate=count_rate)
-  CALL SYSTEM_CLOCK (count=count_start)
-
-!$acc kernels loop private(k, &
-!$acc            term1,term2,term3,term4,term5_AD, &
-!$acc            trans1,trans3,trans4,temp1,temp2,temp3,C1_AD,C2_AD)
-  DO k = 1, N_LAYERS
-  CALL CRTM_Doubling_layer_AD(RTV%n_Streams, RTV%n_Angles, k, w( k ), T_OD( k ),      &        !Input
-                           RTV%COS_Angle, RTV%COS_Weight, RTV%Pff( :, :, k ), RTV%Pbb( :, :, k ), & ! Input
-                           RTV%Planck_Atmosphere( k ),    & !Input
-                           s_trans_AD( :, :, k ), s_refl_AD( :, :, k ), s_source_up_AD( :, k ),   & 
-                           s_source_down_AD( :, k ), RTV, w_AD( k ), T_OD_AD( k ), Pff_AD( :, :, k ), & 
-                           Pbb_AD( :, :, k ), Planck_Atmosphere_AD( k ), &
-                           term1,term2,term3,term4,term5_AD,trans1,trans3,trans4,temp1,temp2,temp3,C1_AD,C2_AD)  !Output
-  ENDDO
-!$acc end kernels
-
-  CALL SYSTEM_CLOCK (count=count_end)
-  elapsed = REAL (count_end - count_start) / REAL (count_rate)
-  PRINT*
-  PRINT*
-  PRINT*, "Finished executing kernel in =", elapsed  
-  PRINT*
-  !------- Test -------!
-!$acc update self(s_trans_AD)
-  PRINT*, s_trans_AD(:,1,1)
-
  CONTAINS
 
   SUBROUTINE  myMATMUL(A, B, C)
@@ -151,7 +71,7 @@ PROGRAM test_kernels
     REAL(fp) :: acc
     INTEGER :: I, J, K
 
-!$acc loop collapse(2)
+!$acc loop collapse(2) private(acc)
     DO I = 1, MAX_N_ANGLES
       DO J = 1, MAX_N_ANGLES
         acc = 0
@@ -179,6 +99,21 @@ PROGRAM test_kernels
     END DO
 
   END SUBROUTINE myTRANSPOSE
+
+  SUBROUTINE myADD(A, B, C)
+!$acc routine worker
+    REAL(fp), INTENT(IN), DIMENSION(1:MAX_N_ANGLES,1:MAX_N_ANGLES) :: A, B
+    REAL(fp), INTENT(OUT), DIMENSION(1:MAX_N_ANGLES,1:MAX_N_ANGLES) :: C
+    INTEGER :: I, J
+
+!$acc loop collapse(2)
+    DO I = 1, MAX_N_ANGLES
+      DO J = 1, MAX_N_ANGLES
+         C(I,J) = A(I,J) + B(I,J)
+      END DO
+    END DO
+
+  END SUBROUTINE myADD
 
   SUBROUTINE RTV_Create( &
     RTV, &
@@ -236,8 +171,8 @@ PROGRAM test_kernels
     RTV%Refl=RTV%Refl/100.0_fp
     RTV%Trans=RTV%Trans/100.0_fp
     RTV%Inv_Bet=RTV%Inv_Bet/100.0_fp
-    !------  Deep copy -------! 
-!$acc enter data copyin(RTV)
+
+    !------  Manual deep copy -------! 
 !$acc enter data copyin(RTV%Pff,RTV%Pbb,RTV%Number_Doubling,RTV%Delta_Tau, &
 !$acc                RTV%Refl,RTV%Trans,RTV%Inv_BeT,RTV%C1,RTV%C2)
 
@@ -334,31 +269,31 @@ PROGRAM test_kernels
 
       CALL myMATMUL(trans_AD,trans3,temp1)
       CALL myMATMUL(trans1,trans_AD,temp2)
-      trans_AD = temp1 + temp2
+      CALL myADD(temp1,temp2,trans_AD)
 
       CALL myMATMUL(term1,RTV%Refl(:,:,L-1,KL),temp1)
       CALL myTRANSPOSE(temp1,temp2)
       CALL myMATMUL(temp2,refl_AD,temp1) 
-      trans_AD = trans_AD + temp1
+      CALL myADD(trans_AD,temp1,trans_AD)
 
       CALL myMATMUL(trans1,refl_AD,temp2)
       CALL myMATMUL(temp2,trans4,temp1)
-      term5_AD = term5_AD + temp1
+      CALL myADD(term5_AD,temp1,term5_AD)
 
       CALL myMATMUL(refl_AD,trans4,temp1)
-      trans_AD = trans_AD + temp1
+      CALL myADD(trans_AD,temp1,trans_AD)
 
       CALL myMATMUL(trans1,refl_AD,temp1)
       CALL myTRANSPOSE(RTV%Trans(:,:,L-1,KL),temp3)
       CALL myMATMUL(temp1,temp3,temp2)
-      refl_AD = refl_AD + temp2
+      CALL myADD(refl_AD,temp2,refl_AD)
 
       CALL myTRANSPOSE(RTV%Refl(:,:,L-1,KL),temp3)
       CALL myMATMUL(term5_AD,temp3,temp1)
-      refl_AD = refl_AD + temp1
+      CALL myADD(refl_AD,temp1,refl_AD)
 
       CALL myMATMUL(temp3,term5_AD, temp1)
-      refl_AD = refl_AD + temp1
+      CALL myADD(refl_AD,temp1,refl_AD)
 
     ENDDO
 
@@ -391,5 +326,140 @@ PROGRAM test_kernels
     optical_depth_AD = optical_depth_AD + Delta_Tau_AD/(TWO**RTV%Number_Doubling(KL))
 
   END SUBROUTINE CRTM_Doubling_layer_AD
+
+END MODULE my_kernels
+
+
+!---------------------
+!   Driver
+!---------------------
+PROGRAM test_kernels
+
+  USE my_kernels
+  USE omp_lib
+
+  !------- Test -------!
+  INTEGER, PARAMETER :: N_LAYERS = MAX_N_LAYERS
+  INTEGER, PARAMETER :: N_PROFILESxCHANNELS = 100
+  TYPE(RTV_type), DIMENSION(N_PROFILESxCHANNELS) :: RTV
+  INTEGER :: k, t, alloc_stat, n_omp_threads, streamid
+  INTEGER :: count_rate, count_start, count_end
+  REAL :: elapsed
+
+  !---- local arrays --- !
+  REAL(fp), ALLOCATABLE, DIMENSION( :,:,:,: ) :: Pff_AD,Pbb_AD,s_Refl_AD,s_Trans_AD
+  REAL(fp), ALLOCATABLE, DIMENSION( :,:,: ) :: s_source_UP_AD,s_source_DOWN_AD
+  REAL(fp), ALLOCATABLE, DIMENSION(:,:) ::  w, T_OD
+  REAL(fp), ALLOCATABLE, DIMENSION(:,:) :: w_AD, T_OD_AD
+  REAL(fp), ALLOCATABLE, DIMENSION(:,:) :: Planck_Atmosphere_AD 
+
+  REAL(fp), DIMENSION(MAX_N_ANGLES,MAX_N_ANGLES) :: term1,term2,term3,term4,term5_AD
+  REAL(fp), DIMENSION(MAX_N_ANGLES,MAX_N_ANGLES) :: trans1,trans3,trans4,temp1,temp2,temp3
+  REAL(fp), DIMENSION(MAX_N_ANGLES) :: C1_AD, C2_AD
+
+  !---- openmp -----!
+!$OMP PARALLEL
+!$OMP SINGLE
+  n_omp_threads = OMP_GET_NUM_THREADS()
+!$OMP END SINGLE
+!$OMP END PARALLEL
+
+  WRITE(6,*)
+  WRITE(6,'("   Using",i3," OpenMP threads for ",i3," profiles and channels.")') &
+         n_omp_threads, N_PROFILESxCHANNELS
+  WRITE(6,'("   N_LAYERS = ",i3,", N_ANGLES =",i3)') &
+         N_LAYERS, MAX_N_ANGLES
+  WRITE(6,*)
+
+  !---- allocate ----!
+  ALLOCATE(Pff_AD(MAX_N_ANGLES, MAX_N_ANGLES+1, N_LAYERS, N_PROFILESxCHANNELS), &
+           Pbb_AD(MAX_N_ANGLES, MAX_N_ANGLES+1, N_LAYERS, N_PROFILESxCHANNELS), &
+           s_Refl_AD(MAX_N_ANGLES, MAX_N_ANGLES, N_LAYERS, N_PROFILESxCHANNELS), &
+           s_Trans_AD(MAX_N_ANGLES, MAX_N_ANGLES, N_LAYERS, N_PROFILESxCHANNELS), &
+           s_source_UP_AD(MAX_N_ANGLES, N_LAYERS, N_PROFILESxCHANNELS), &
+           s_source_DOWN_AD(MAX_N_ANGLES, N_LAYERS, N_PROFILESxCHANNELS), &
+           w(N_LAYERS, N_PROFILESxCHANNELS), &
+           T_OD(N_LAYERS, N_PROFILESxCHANNELS), &
+           w_AD(N_LAYERS, N_PROFILESxCHANNELS), &
+           T_OD_AD(N_LAYERS, N_PROFILESxCHANNELS), &
+           Planck_Atmosphere_AD(0:N_LAYERS, N_PROFILESxCHANNELS), &
+           STAT = alloc_stat )
+  IF ( alloc_stat /= 0 ) STOP
+
+  !---- fill arrays with random numbers ----!
+  PRINT*, "Filling arrays with random values"
+  CALL RANDOM_NUMBER(Pff_AD)
+  CALL RANDOM_NUMBER(Pbb_AD)
+  CALL RANDOM_NUMBER(s_Refl_AD)
+  CALL RANDOM_NUMBER(s_Trans_AD)
+  CALL RANDOM_NUMBER(s_source_UP_AD)
+  CALL RANDOM_NUMBER(s_source_DOWN_AD)
+  CALL RANDOM_NUMBER(w)
+  CALL RANDOM_NUMBER(T_OD)
+  CALL RANDOM_NUMBER(w_AD)
+  CALL RANDOM_NUMBER(T_OD_AD)
+  CALL RANDOM_NUMBER(Planck_Atmosphere_AD)
+  PRINT*, "Finished filling arrays with random values."
+
+  DO t = 1, N_PROFILESxCHANNELS
+      RTV(t)%n_Streams = 6
+  END DO
+
+!$acc enter data copyin(Pff_AD,Pbb_AD,s_Refl_AD,s_Trans_AD, &
+!$acc                  s_source_UP_AD,s_source_DOWN_AD, &
+!$acc                  w, T_OD, w_AD, T_OD_AD, Planck_Atmosphere_AD)
+
+!$acc enter data copyin(RTV)
+
+  !---- create RTV array ----!
+  PRINT*, "Creating RTV"
+  DO t = 1, N_PROFILESxCHANNELS
+      CALL RTV_Create( RTV(t), MAX_N_ANGLES, MAX_N_LEGENDRE_TERMS, N_LAYERS )
+  ENDDO
+  PRINT*, "Finished creating RTV"
+
+  !---- call kernel ----!
+  PRINT*, "Calling kernel"  
+  CALL SYSTEM_CLOCK (count_rate=count_rate)
+  CALL SYSTEM_CLOCK (count=count_start)
+
+!$omp parallel do private(t,k,streamid, &
+!$omp            term1,term2,term3,term4,term5_AD, &
+!$omp            trans1,trans3,trans4,temp1,temp2,temp3,C1_AD,C2_AD)
+  DO t = 1, N_PROFILESxCHANNELS
+
+  streamid = mod(t,n_omp_threads)
+
+!$acc kernels loop async(streamid) private(k, &
+!$acc            term1,term2,term3,term4,term5_AD, &
+!$acc            trans1,trans3,trans4,temp1,temp2,temp3,C1_AD,C2_AD) &
+!$acc present(Pff_AD,Pbb_AD,s_Refl_AD,s_Trans_AD, &
+!$acc            s_source_UP_AD,s_source_DOWN_AD, &
+!$acc            w, T_OD, w_AD, T_OD_AD, Planck_Atmosphere_AD)
+  DO k = 1, N_LAYERS
+       CALL CRTM_Doubling_layer_AD(RTV(t)%n_Streams, RTV(t)%n_Angles, k, w( k, t ), T_OD( k, t ),      &        !Input
+                           RTV(t)%COS_Angle, RTV(t)%COS_Weight, RTV(t)%Pff( :, :, k ), RTV(t)%Pbb( :, :, k ), & ! Input
+                           RTV(t)%Planck_Atmosphere( k ),    & !Input
+                           s_trans_AD( :, :, k, t ), s_refl_AD( :, :, k, t ), s_source_up_AD( :, k, t ),   & 
+                           s_source_down_AD( :, k, t ), RTV(t), w_AD( k, t ), T_OD_AD( k, t ), Pff_AD( :, :, k, t ), & 
+                           Pbb_AD( :, :, k, t ), Planck_Atmosphere_AD( k, t ), &
+                           term1,term2,term3,term4,term5_AD,trans1,trans3,trans4,temp1,temp2,temp3,C1_AD,C2_AD)  !Output
+  ENDDO
+!$acc end kernels
+
+  ENDDO
+!$omp end parallel do
+
+!$acc wait
+
+  CALL SYSTEM_CLOCK (count=count_end)
+  elapsed = REAL (count_end - count_start) / REAL (count_rate)
+  PRINT*
+  PRINT*
+  PRINT*, "Finished executing kernel in =", elapsed  
+  PRINT*
+  !------- Test -------!
+!$acc update self(s_trans_AD)
+  PRINT*, s_trans_AD(:,1,1,1)
 
 END PROGRAM test_kernels

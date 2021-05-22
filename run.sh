@@ -1,10 +1,13 @@
 #!/bin/sh
-echo "Running version 1"
-echo "======================="
+echo
+echo "Running version 1 of GPU kernels"
+echo "================================="
 PGI_COMPARE=abs=13 ./kernel_v1
-echo "Running version 2"
-echo "======================="
+echo
+echo "Running version 2 of GPU kernel"
+echo "==============================="
 PGI_COMPARE=abs=13 ./kernel_v2
+echo
 echo "Running on cpu"
 echo "======================="
 ./kernel_cpu
