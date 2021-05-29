@@ -17,7 +17,9 @@ MODULE my_kernels
   INTEGER, PARAMETER :: MAX_N_LEGENDRE_TERMS = 16
   INTEGER, PARAMETER :: MAX_N_DOUBLING = 55
   INTEGER, PARAMETER :: MAX_N_SOI_ITERATIONS = 75
- 
+
+  INTEGER :: N_GPUS 
+
   !---- RTV type ---!
   TYPE :: RTV_type
   
@@ -198,9 +200,10 @@ MODULE my_kernels
                                         ff_AD, & ! Output AD forward Phase matrix
                                         bb_AD, & ! Output AD backward Phase matrix
                                Planck_Func_AD, & ! Output AD Planck for layer temperature
+                               streamid, &
                                term1,term2,term3,term4,term5_AD,trans1,trans3,trans4,temp1,temp2,temp3,C1_AD,C2_AD)   ! Temporaries
 
-    INTEGER, INTENT(IN) :: n_streams,NANG,KL
+    INTEGER, INTENT(IN) :: n_streams,NANG,KL,streamid
     TYPE(RTV_type), INTENT(IN) :: RTV
 !$acc declare copyin(RTV)
     REAL(fp), INTENT(IN), DIMENSION(1:MAX_N_ANGLES,1:MAX_N_ANGLES+1) :: ff,bb
@@ -228,7 +231,7 @@ MODULE my_kernels
 
     ! Tangent-Linear Beginning
     IF( optical_depth < OPTICAL_DEPTH_THRESHOLD ) THEN
-!$acc kernels async(KL)
+!$acc kernels async(streamid)
       trans_AD = ZERO
       refl_AD = ZERO
       source_up_AD = ZERO
@@ -237,7 +240,7 @@ MODULE my_kernels
       RETURN
     ENDIF
   
-!$acc kernels async(KL) 
+!$acc kernels async(streamid) 
 !$acc loop reduction(+:Planck_Func_AD)
     DO i = NANG, 1, -1
       source_up_AD(i) = source_up_AD(i) + source_down_AD(i)
@@ -258,11 +261,10 @@ MODULE my_kernels
         trans_AD(i,j)=trans_AD(i,j)+C1_AD(i)
       END DO
     END DO
-!$acc end kernels
 
+!$acc loop seq
     DO L = RTV%Number_Doubling(KL), 1, -1 
 
-!$acc kernels async(KL)
       CALL myMATMUL(RTV%Trans(:,:,L-1,KL),RTV%Inv_BeT(:,:,L,KL), term1)
       CALL myMATMUL(RTV%Inv_BeT(:,:,L,KL),RTV%Refl(:,:,L-1,KL), term2)
       CALL myMATMUL(RTV%Inv_BeT(:,:,L,KL),RTV%Trans(:,:,L-1,KL), term3)
@@ -302,11 +304,9 @@ MODULE my_kernels
 
       CALL myMATMUL(temp3,term5_AD, temp1)
       CALL myADD(refl_AD,temp1,refl_AD)
-!$acc end kernels
 
     ENDDO
 
-!$acc kernels async(KL)
     s = RTV%Delta_Tau(KL) * single_albedo
     c_AD = ZERO
     s_AD = ZERO
@@ -348,12 +348,14 @@ PROGRAM test_kernels
 
   USE my_kernels
   USE omp_lib
+  USE openacc
 
   !------- Test -------!
   INTEGER, PARAMETER :: N_LAYERS = MAX_N_LAYERS
   INTEGER, PARAMETER :: N_PROFILESxCHANNELS = 100
-  TYPE(RTV_type), DIMENSION(N_PROFILESxCHANNELS) :: RTV
+  TYPE(RTV_type), ALLOCATABLE, DIMENSION(:) :: RTV
   INTEGER :: k, t, alloc_stat, n_omp_threads, streamid
+  INTEGER :: N_PROFS_PER_GPU, s, e, gpuid
   INTEGER :: count_rate, count_start, count_end
   REAL :: elapsed
 
@@ -382,7 +384,20 @@ PROGRAM test_kernels
          N_LAYERS, MAX_N_ANGLES
   WRITE(6,*)
 
+  !----- multi-gpu ---!
+  N_GPUS = acc_get_num_devices(acc_device_nvidia)
+  WRITE(6,'(" Number of GPUS = ",i3)') N_GPUS
+  IF (N_GPUS .eq. 0) THEN
+     N_PROFS_PER_GPU = N_PROFILESxCHANNELS
+  ELSE
+     N_PROFS_PER_GPU = (N_PROFILESxCHANNELS + N_GPUS - 1) / N_GPUS
+  ENDIF
+
   !---- allocate ----!
+  ALLOCATE(RTV(N_PROFILESxCHANNELS), &
+           STAT = alloc_stat)
+  IF ( alloc_stat /= 0 ) STOP
+
   ALLOCATE(Pff_AD(MAX_N_ANGLES, MAX_N_ANGLES+1, N_LAYERS, N_PROFILESxCHANNELS), &
            Pbb_AD(MAX_N_ANGLES, MAX_N_ANGLES+1, N_LAYERS, N_PROFILESxCHANNELS), &
            s_Refl_AD(MAX_N_ANGLES, MAX_N_ANGLES, N_LAYERS, N_PROFILESxCHANNELS), &
@@ -412,19 +427,33 @@ PROGRAM test_kernels
   CALL RANDOM_NUMBER(Planck_Atmosphere_AD)
   PRINT*, "Finished filling arrays with random values."
 
+  !---- fill RTV ----!
   DO t = 1, N_PROFILESxCHANNELS
       RTV(t)%n_Streams = 6
   END DO
 
-!$acc enter data copyin(Pff_AD,Pbb_AD,s_Refl_AD,s_Trans_AD, &
-!$acc                  s_source_UP_AD,s_source_DOWN_AD, &
-!$acc                  w, T_OD, w_AD, T_OD_AD, Planck_Atmosphere_AD)
+  !--- Copy data to GPU ---!
+  DO gpuid = 0, N_GPUS - 1
+     CALL acc_set_device_num(gpuid,acc_device_nvidia)
+     s = gpuid * N_PROFS_PER_GPU + 1
+     e = MIN(N_PROFILESxCHANNELS, s + N_PROFS_PER_GPU - 1)
+
+     WRITE(6,'( "GPU=",i2," section: ",i4,":",i4)') gpuid, s, e
+
+!$acc enter data copyin(Pff_AD(:,:,:,s:e),Pbb_AD(:,:,:,s:e),s_Refl_AD(:,:,:,s:e),s_Trans_AD(:,:,:,s:e), &
+!$acc                  s_source_UP_AD(:,:,s:e),s_source_DOWN_AD(:,:,s:e), &
+!$acc                  w(:,s:e), T_OD(:,s:e), w_AD(:,s:e), T_OD_AD(:,s:e), Planck_Atmosphere_AD(:,s:e))
 
 !$acc enter data copyin(RTV)
+  ENDDO
 
   !---- create RTV array ----!
   PRINT*, "Creating RTV"
   DO t = 1, N_PROFILESxCHANNELS
+
+      gpuid = (t - 1) / N_PROFS_PER_GPU
+      CALL acc_set_device_num(gpuid,acc_device_nvidia)
+
       CALL RTV_Create( RTV(t), MAX_N_ANGLES, MAX_N_LEGENDRE_TERMS, N_LAYERS )
   ENDDO
   PRINT*, "Finished creating RTV"
@@ -434,27 +463,42 @@ PROGRAM test_kernels
   CALL SYSTEM_CLOCK (count_rate=count_rate)
   CALL SYSTEM_CLOCK (count=count_start)
 
-!$omp parallel do private(t,k,streamid, &
+!$omp parallel do private(t,k,streamid,gpuid, &
 !$omp            term1,term2,term3,term4,term5_AD, &
 !$omp            trans1,trans3,trans4,temp1,temp2,temp3,C1_AD,C2_AD)
   DO t = 1, N_PROFILESxCHANNELS
 
-  streamid = mod(t,n_omp_threads)
+  streamid = mod(t - 1,n_omp_threads)
+  gpuid = (t - 1) / N_PROFS_PER_GPU
 
+  CALL acc_set_device_num(gpuid,acc_device_nvidia)
+
+!$acc data &
+!$acc present(Pff_AD(:,:,:,t),Pbb_AD(:,:,:,t),s_Refl_AD(:,:,:,t),s_Trans_AD(:,:,:,t), &
+!$acc                  s_source_UP_AD(:,:,t),s_source_DOWN_AD(:,:,t), &
+!$acc                  w(:,t), T_OD(:,t), w_AD(:,t), T_OD_AD(:,t), Planck_Atmosphere_AD(:,t))
+!$acc loop private(k,streamid, &
+!$acc            term1,term2,term3,term4,term5_AD, &
+!$acc            trans1,trans3,trans4,temp1,temp2,temp3,C1_AD,C2_AD)
   DO k = 1, N_LAYERS
+       streamid = k
        CALL CRTM_Doubling_layer_AD(RTV(t)%n_Streams, RTV(t)%n_Angles, k, w( k, t ), T_OD( k, t ),      &        !Input
                            RTV(t)%COS_Angle, RTV(t)%COS_Weight, RTV(t)%Pff( :, :, k ), RTV(t)%Pbb( :, :, k ), & ! Input
                            RTV(t)%Planck_Atmosphere( k ),    & !Input
                            s_trans_AD( :, :, k, t ), s_refl_AD( :, :, k, t ), s_source_up_AD( :, k, t ),   & 
                            s_source_down_AD( :, k, t ), RTV(t), w_AD( k, t ), T_OD_AD( k, t ), Pff_AD( :, :, k, t ), & 
-                           Pbb_AD( :, :, k, t ), Planck_Atmosphere_AD( k, t ), &
+                           Pbb_AD( :, :, k, t ), Planck_Atmosphere_AD( k, t ), streamid, &
                            term1,term2,term3,term4,term5_AD,trans1,trans3,trans4,temp1,temp2,temp3,C1_AD,C2_AD)  !Output
   ENDDO
+!$acc end data
 
   ENDDO
 !$omp end parallel do
 
+  DO gpuid = 0, N_GPUS - 1
+     CALL acc_set_device_num(gpuid,acc_device_nvidia)
 !$acc wait
+  ENDDO
 
   CALL SYSTEM_CLOCK (count=count_end)
   elapsed = REAL (count_end - count_start) / REAL (count_rate)
@@ -462,8 +506,15 @@ PROGRAM test_kernels
   PRINT*
   PRINT*, "Finished executing kernel in =", elapsed  
   PRINT*
-  !------- Test -------!
-!$acc update self(s_trans_AD)
+
+  !------- Print section of output -------!
+  DO gpuid = 0, N_GPUS - 1
+     CALL acc_set_device_num(gpuid,acc_device_nvidia)
+     s = gpuid * N_PROFS_PER_GPU + 1
+     e = MIN(N_PROFILESxCHANNELS, s + N_PROFS_PER_GPU - 1)
+!$acc update self(s_trans_AD(:,:,:,s:e))
+  ENDDo
+
   PRINT*, s_trans_AD(:,1,1,1)
 
 END PROGRAM test_kernels

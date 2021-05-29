@@ -1,4 +1,7 @@
 #!/bin/sh
+
+export CUDA_VISIBLE_DEVICES="0"
+
 echo
 echo "Running version 1 of GPU kernels"
 echo "================================="
