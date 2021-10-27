@@ -67,7 +67,7 @@ MODULE my_kernels
  CONTAINS
 
   SUBROUTINE  myMATMUL(A, B, C)
-!$acc routine worker
+!$acc routine vector
     REAL(fp), INTENT(IN), DIMENSION(1:MAX_N_ANGLES,1:MAX_N_ANGLES) :: A, B
     REAL(fp), INTENT(OUT), DIMENSION(1:MAX_N_ANGLES,1:MAX_N_ANGLES) :: C
     REAL(fp) :: acc
@@ -88,7 +88,7 @@ MODULE my_kernels
   END SUBROUTINE myMATMUL
 
   SUBROUTINE myTRANSPOSE(A, At)
-!$acc routine worker
+!$acc routine vector
     REAL(fp), INTENT(IN), DIMENSION(1:MAX_N_ANGLES,1:MAX_N_ANGLES) :: A
     REAL(fp), INTENT(OUT), DIMENSION(1:MAX_N_ANGLES,1:MAX_N_ANGLES) :: At
     INTEGER :: I, J
@@ -103,7 +103,7 @@ MODULE my_kernels
   END SUBROUTINE myTRANSPOSE
 
   SUBROUTINE myADD(A, B, C)
-!$acc routine worker
+!$acc routine vector
     REAL(fp), INTENT(IN), DIMENSION(1:MAX_N_ANGLES,1:MAX_N_ANGLES) :: A, B
     REAL(fp), INTENT(OUT), DIMENSION(1:MAX_N_ANGLES,1:MAX_N_ANGLES) :: C
     INTEGER :: I, J
@@ -202,7 +202,7 @@ MODULE my_kernels
                                Planck_Func_AD, & ! Output AD Planck for layer temperature
                                term1,term2,term3,term4,term5_AD,trans1,trans3,trans4,temp1,temp2,temp3,C1_AD,C2_AD)   ! Temporaries
 
-!$acc routine worker
+!$acc routine vector
     INTEGER, INTENT(IN) :: n_streams,NANG,KL
     TYPE(RTV_type), INTENT(IN) :: RTV
     REAL(fp), INTENT(IN), DIMENSION(1:MAX_N_ANGLES,1:MAX_N_ANGLES+1) :: ff,bb
