@@ -642,22 +642,38 @@ PROGRAM test_kernels
 !$acc                  s_source_UP_AD(:,:,s:e),s_source_DOWN_AD(:,:,s:e), &
 !$acc                  w(:,s:e), T_OD(:,s:e), w_AD(:,s:e), T_OD_AD(:,s:e), Planck_Atmosphere_AD(:,s:e))
 
-!$acc enter data copyin(RTV)
   ENDDO
 #endif
 
   !---- create RTV array ----!
+  !---- manual deepcopy with explicit attach ---- !
+  !---- For some reason implicit attach does not work ----!
   PRINT*, "Creating RTV"
   DO t = 1, N_PROFILESxCHANNELS
-
       gpuid = (t - 1) / N_PROFS_PER_GPU
 #ifdef _OPENACC
       CALL acc_set_device_num(gpuid,acc_device_nvidia)
 #endif
-
       CALL RTV_Create( RTV(t), MAX_N_ANGLES, MAX_N_LEGENDRE_TERMS, N_LAYERS )
   ENDDO
+
+#ifdef _OPENACC
+  DO gpuid = 0, N_GPUS - 1
+     CALL acc_set_device_num(gpuid,acc_device_nvidia)
+!$acc enter data copyin(RTV)
+  ENDDO
+#endif
+
+  DO t = 1, N_PROFILESxCHANNELS
+      gpuid = (t - 1) / N_PROFS_PER_GPU
+#ifdef _OPENACC
+      CALL acc_set_device_num(gpuid,acc_device_nvidia)
+#endif
+!$acc enter data attach(RTV(t)%Pff,RTV(t)%Pbb,RTV(t)%Number_Doubling,RTV(t)%Delta_Tau, &
+!$acc                RTV(t)%Refl,RTV(t)%Trans,RTV(t)%Inv_BeT,RTV(t)%C1,RTV(t)%C2)
+  ENDDO
   PRINT*, "Finished creating RTV"
+
 
   !------- Print input state statistics -------!
   CALL print_state("Input state", &
